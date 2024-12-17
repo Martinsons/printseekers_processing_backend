@@ -22,7 +22,9 @@ class Settings(BaseSettings):
         "http://localhost:5175",  # Vue dev server alternate port
         "http://localhost:8000",  # Local backend
         "https://*.railway.app",  # Railway deployed apps
-        "https://*.up.railway.app"  # Railway deployed apps
+        "https://*.up.railway.app",  # Railway deployed apps
+        "https://*.netlify.app",  # Netlify deployed frontend
+        "https://printseekerstest1.netlify.app"  # Your Netlify app
     ]
     
     # File Settings
