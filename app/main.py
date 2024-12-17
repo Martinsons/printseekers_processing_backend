@@ -379,6 +379,22 @@ async def health_check():
             detail=str(e)
         )
 
+@app.get("/")
+async def root():
+    """Root endpoint providing API information"""
+    return {
+        "name": "PrintSeekers Processing API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "process_fedex_bill": "/api/process/fedex-bill",
+            "download_file": "/api/download/{file_path}",
+            "cleanup_files": "/api/files/cleanup",
+            "compare_shipping_costs": "/api/compare-shipping-costs",
+            "health": "/health"
+        }
+    }
+
 # Cleanup scheduler
 @app.on_event("startup")
 async def setup_periodic_cleanup():
