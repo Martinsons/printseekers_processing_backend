@@ -50,16 +50,11 @@ TEMP_DIR = os.path.join("backend", "temp")
 app = FastAPI(title="Batch Processing API")
 settings = get_settings()
 
-# Configure CORS
+# Configure CORS with more permissive settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vue dev server
-        "http://localhost:5174",  # Vue dev server alternate port
-        "http://localhost:8000",  # Local backend
-        "https://printseekerstest1.netlify.app",  # Your Netlify app
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],  # Allow all origins during development
+    allow_credentials=False,  # Set to False when using allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
