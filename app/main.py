@@ -76,16 +76,21 @@ async def startup_event():
 
         # Check directories
         dirs_to_check = [
-            Path("/app/backend/processed_files/default"),
-            Path("/app/backend/temp")
+            Path("processed_files/default"),
+            Path("temp")
         ]
         
         for dir_path in dirs_to_check:
             logger.info(f"Checking directory: {dir_path}")
-            logger.info(f"  Exists: {dir_path.exists()}")
-            logger.info(f"  Is directory: {dir_path.is_dir() if dir_path.exists() else False}")
-            logger.info(f"  Permissions: {oct(dir_path.stat().st_mode)[-3:] if dir_path.exists() else 'N/A'}")
-            
+            try:
+                dir_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"  Created/verified directory: {dir_path}")
+                logger.info(f"  Exists: {dir_path.exists()}")
+                logger.info(f"  Is directory: {dir_path.is_dir()}")
+                logger.info(f"  Permissions: {oct(dir_path.stat().st_mode)[-3:]}")
+            except Exception as e:
+                logger.error(f"  Error creating directory {dir_path}: {str(e)}")
+
         global startup_completed
         startup_completed = True
         logger.info("Application startup completed successfully")

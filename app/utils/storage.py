@@ -10,15 +10,19 @@ from datetime import datetime
 class StorageManager:
     def __init__(self):
         self.temp_dir = Path("temp")
+        self.processed_dir = Path("processed_files")
         self._ensure_directories()
 
     def _ensure_directories(self):
         """Ensure necessary directories exist"""
-        self.temp_dir.mkdir(exist_ok=True)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.processed_dir.mkdir(parents=True, exist_ok=True)
+        (self.processed_dir / "default").mkdir(parents=True, exist_ok=True)
+        logging.info(f"Directories created/verified: {self.temp_dir}, {self.processed_dir}")
 
     async def save_temp_file(self, file: UploadFile) -> Path:
         """Save an uploaded file temporarily"""
-        self.temp_dir.mkdir(exist_ok=True)
+        self._ensure_directories()
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_filename = f"{timestamp}_{file.filename}"
@@ -36,11 +40,11 @@ class StorageManager:
 
     async def cleanup_temp_files(self, max_age_hours: int = 1):
         """Clean up temporary files older than specified hours"""
-        current_time = datetime.now().timestamp()
-        
         if not self.temp_dir.exists():
             return
 
+        current_time = datetime.now().timestamp()
+        
         for file_path in self.temp_dir.glob("*"):
             if file_path.is_file():
                 file_age = current_time - os.path.getmtime(file_path)
