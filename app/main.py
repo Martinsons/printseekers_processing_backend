@@ -53,10 +53,17 @@ settings = get_settings()
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_origins=[
+        "http://localhost:5173",  # Vue dev server
+        "http://localhost:5174",  # Vue dev server alternate port
+        "http://localhost:8000",  # Local backend
+        "https://printseekerstest1.netlify.app",  # Your Netlify app
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 # Add these at the top with your other imports
