@@ -2,27 +2,12 @@ import os
 import sys
 import logging
 from pathlib import Path
-
-
-# Configure logging at the very start
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
-
-# Log environment information immediately
-logger.info("=== Application Initialization ===")
-logger.info(f"Python version: {sys.version}")
-logger.info(f"Current working directory: {os.getcwd()}")
-logger.info(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
-logger.info(f"PORT: {os.getenv('PORT')}")
-logger.info(f"Directory contents: {os.listdir()}")
-
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 import asyncio
 import pandas as pd
 from typing import List, Dict, Any
@@ -50,6 +35,22 @@ TEMP_DIR = os.path.join("backend", "temp")
 app = FastAPI(title="Batch Processing API")
 settings = get_settings()
 
+# Configure logging at the very start
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# Log environment information immediately
+logger.info("=== Application Initialization ===")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Current working directory: {os.getcwd()}")
+logger.info(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
+logger.info(f"PORT: {os.getenv('PORT')}")
+logger.info(f"Directory contents: {os.listdir()}")
+
 # Configure CORS for Netlify frontend
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +61,26 @@ app.add_middleware(
     expose_headers=["*"],
     max_age=3600,
 )
+
+# Configure maximum upload size
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["*"]
+)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": str(exc)},
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": str(exc.detail)},
+    )
 
 # Add these at the top with your other imports
 startup_completed = False
@@ -117,11 +138,16 @@ async def validate_upload_file(file: UploadFile) -> UploadFile:
 @app.post("/api/process/fedex-bill")
 async def process_fedex_bill(file: UploadFile = File(...)):
     try:
-        # Validate file
-        file = await validate_upload_file(file)
+        # Log the incoming request
+        logger.info(f"Processing file: {file.filename}")
         
+        # Validate file
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+            
         # Save file temporarily
         file_path = await storage.save_temp_file(file)
+        logger.info(f"File saved temporarily at: {file_path}")
         
         try:
             # Process the file
@@ -129,16 +155,19 @@ async def process_fedex_bill(file: UploadFile = File(...)):
             result = processor.process()
             
             if result.get("error"):
-                raise FileProcessingError(result["error"])
+                raise HTTPException(status_code=400, detail=result["error"])
                 
             return result
-            
+        except Exception as e:
+            logger.error(f"Error processing file: {str(e)}")
+            raise HTTPException(status_code=422, detail=f"Error processing file: {str(e)}")
         finally:
-            # Always clean up the temporary file
-            storage.remove_temp_file(file_path)
-            
+            # Clean up temporary file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
     except Exception as e:
-        logging.error(f"Error processing FedEx bill: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/download/{file_path:path}")
