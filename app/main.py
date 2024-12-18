@@ -55,11 +55,9 @@ logger.info(f"Directory contents: {os.listdir()}")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://printseekerstest1.netlify.app"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=False,
-    expose_headers=["*"],
-    max_age=3600,
 )
 
 # Configure maximum upload size
