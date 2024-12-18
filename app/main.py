@@ -56,7 +56,9 @@ app.add_middleware(
     allow_origins=["https://printseekerstest1.netlify.app"],
     allow_methods=["*"],
     allow_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
+    allow_credentials=False,
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 # Add these at the top with your other imports
