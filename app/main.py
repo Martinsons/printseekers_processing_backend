@@ -50,13 +50,13 @@ TEMP_DIR = os.path.join("backend", "temp")
 app = FastAPI(title="Batch Processing API")
 settings = get_settings()
 
-# Configure CORS
+# Configure CORS for Netlify frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://printseekerstest1.netlify.app"],
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=False  # Set to False since we're not using cookies
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 # Add these at the top with your other imports
