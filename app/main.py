@@ -35,6 +35,10 @@ TEMP_DIR = os.path.join("backend", "temp")
 app = FastAPI(title="Batch Processing API")
 settings = get_settings()
 
+# Constants for file handling
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB limit
+CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file handling
+
 # Configure logging at the very start
 logging.basicConfig(
     level=logging.DEBUG,
@@ -51,16 +55,30 @@ logger.info(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
 logger.info(f"PORT: {os.getenv('PORT')}")
 logger.info(f"Directory contents: {os.listdir()}")
 
-# Configure CORS for Netlify frontend
+# Configure CORS for frontend applications
+origins = [
+    "https://printseekerstest1.netlify.app",  # Production frontend
+    "http://localhost:3000",                   # Local development frontend
+    "http://localhost:5173",                   # Vite default port
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://printseekerstest1.netlify.app"],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+    ],
+    expose_headers=["Content-Disposition"],
+    max_age=600,  # Cache preflight requests for 10 minutes
 )
 
-# Configure maximum upload size
+# Configure maximum upload size and trusted hosts
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=["*"]
@@ -139,34 +157,70 @@ async def process_fedex_bill(file: UploadFile = File(...)):
         # Log the incoming request
         logger.info(f"Processing file: {file.filename}")
         
-        # Validate file
+        # Check file size before processing
+        file.file.seek(0, 2)  # Seek to end
+        size = file.file.tell()
+        file.file.seek(0)  # Reset position
+        
+        if size > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE/1024/1024}MB"
+            )
+
+        # Validate file type
         if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-            
-        # Save file temporarily
-        file_path = await storage.save_temp_file(file)
-        logger.info(f"File saved temporarily at: {file_path}")
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF files are allowed"
+            )
+
+        # Create temporary file path
+        temp_file_path = Path(settings.TEMP_DIR) / f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
         
         try:
+            # Save file in chunks to avoid memory issues
+            with open(temp_file_path, "wb") as buffer:
+                while chunk := await file.read(CHUNK_SIZE):
+                    buffer.write(chunk)
+            
+            logger.info(f"File saved temporarily at: {temp_file_path}")
+            
             # Process the file
-            processor = FedexBillProcessor(str(file_path))
+            processor = FedexBillProcessor(str(temp_file_path))
             result = processor.process()
             
             if result.get("error"):
                 raise HTTPException(status_code=400, detail=result["error"])
-                
-            return result
+            
+            return {
+                "success": True,
+                "data": result
+            }
+            
         except Exception as e:
             logger.error(f"Error processing file: {str(e)}")
-            raise HTTPException(status_code=422, detail=f"Error processing file: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
         finally:
             # Clean up temporary file
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                
+            if temp_file_path.exists():
+                temp_file_path.unlink()
+                logger.info(f"Cleaned up temporary file: {temp_file_path}")
+    
+    except HTTPException as he:
+        return {
+            "success": False,
+            "error": he.detail
+        }
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "success": False,
+            "error": f"An unexpected error occurred: {str(e)}"
+        }
 
 @app.get("/api/download/{file_path:path}")
 async def download_file(file_path: str):
