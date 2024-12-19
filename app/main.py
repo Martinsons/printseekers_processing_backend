@@ -217,14 +217,25 @@ async def cleanup_files():
 async def compare_shipping_costs(file: UploadFile = File(...)):
     try:
         # Validate file
-        file = await validate_upload_file(file)
+        await validate_upload_file(file)
         
-        # Save file
-        file_path = await storage.save_temp_file(file)
+        # Create a temporary file to store chunks
+        temp_file_path = Path(settings.TEMP_DIR) / f"compare_costs_{datetime.now().timestamp()}.xlsx"
         
         try:
-            # Read Excel file
-            df = pd.read_excel(file_path)
+            # Process file in chunks to avoid memory issues
+            with open(temp_file_path, "wb") as temp_file:
+                while chunk := await file.read(CHUNK_SIZE):
+                    temp_file.write(chunk)
+                    await asyncio.sleep(0)  # Allow other tasks to run
+            
+            # Read Excel file with optimized settings
+            df = pd.read_excel(
+                temp_file_path,
+                usecols=['Sutijuma Nr', 'Summa', 'Dimensijas'],
+                dtype={'Sutijuma Nr': str, 'Dimensijas': str},
+                engine='openpyxl'
+            )
             
             # Validate required columns
             required_columns = ['Sutijuma Nr', 'Summa']
@@ -242,23 +253,22 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                     cost = pd.to_numeric(value, errors='coerce')
                     return float(cost) if not pd.isna(cost) else None
                 except Exception as e:
-                    logging.error(f"Error cleaning cost value '{value}': {str(e)}")
+                    logger.error(f"Error cleaning cost value '{value}': {str(e)}")
                     return None
 
             df['Summa'] = df['Summa'].apply(clean_cost)
             tracking_numbers = df['Sutijuma Nr'].tolist()
 
-            try:
-                # Process in batches
-                BATCH_SIZE = 50
-                DELAY_BETWEEN_BATCHES = 0.5
-                fedex_data = {}
-                printseekers_data = {}
-                
-                # Fetch data from fedex_orderi
-                for i in range(0, len(tracking_numbers), BATCH_SIZE):
-                    batch = tracking_numbers[i:i + BATCH_SIZE]
-                    
+            # Process in batches
+            BATCH_SIZE = 50
+            DELAY_BETWEEN_BATCHES = 0.5
+            fedex_data = {}
+            printseekers_data = {}
+            
+            # Fetch data from fedex_orderi
+            for i in range(0, len(tracking_numbers), BATCH_SIZE):
+                batch = tracking_numbers[i:i + BATCH_SIZE]
+                try:
                     result = supabaseDb.from_('fedex_orderi') \
                         .select('''
                             masterTrackingNumber,
@@ -284,13 +294,16 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                                     'senderContactName': item.get('senderContactName', 'N/A'),
                                     'recipientCountry': item.get('recipientCountry', 'N/A')
                                 }
-                    
-                    await asyncio.sleep(DELAY_BETWEEN_BATCHES)
+                except Exception as e:
+                    logger.error(f"Error fetching fedex_orderi batch: {str(e)}")
+                    continue
+                
+                await asyncio.sleep(DELAY_BETWEEN_BATCHES)
 
-                # Fetch data from printseekers_orderi
-                for i in range(0, len(tracking_numbers), BATCH_SIZE):
-                    batch = tracking_numbers[i:i + BATCH_SIZE]
-                    
+            # Fetch data from printseekers_orderi
+            for i in range(0, len(tracking_numbers), BATCH_SIZE):
+                batch = tracking_numbers[i:i + BATCH_SIZE]
+                try:
                     result = supabaseDb.from_('printseekers_orderi') \
                         .select('TrackingNumber, ProductType, ProductCategory') \
                         .in_('TrackingNumber', batch) \
@@ -303,74 +316,79 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                                     'productType': item.get('ProductType', 'N/A'),
                                     'productCategory': item.get('ProductCategory', 'N/A')
                                 }
-                    
-                    await asyncio.sleep(DELAY_BETWEEN_BATCHES)
-
-                # Prepare comparison data
-                comparisons = []
-                for _, row in df.iterrows():
-                    tracking_number = row['Sutijuma Nr']
-                    excel_cost = row['Summa']
-                    fedex_info = fedex_data.get(tracking_number, {})
-                    printseekers_info = printseekers_data.get(tracking_number, {})
-                    
-                    def calculate_difference(excel_cost, db_cost):
-                        try:
-                            excel_value = float(excel_cost)
-                            db_value = float(db_cost)
-                            difference = excel_value - db_value
-                            
-                            # Return 'OK' if difference is effectively zero
-                            if abs(difference) < 0.01:
-                                return 'OK'
-                            
-                            return difference
-                        except (ValueError, TypeError):
-                            return 'N/A'
-
-                    comparison = {
-                        'trackingNumber': tracking_number,
-                        'excelCost': excel_cost if excel_cost is not None else 'Invalid value',
-                        'databaseCost': fedex_info.get('estimatedShippingCosts', 'Not found'),
-                        'costDifference': calculate_difference(
-                            excel_cost if excel_cost is not None else None,
-                            fedex_info.get('estimatedShippingCosts')
-                        ),
-                        'serviceType': fedex_info.get('serviceType', 'N/A'),
-                        'excelDimensions': str(row.get('Dimensijas', '')).strip() if not pd.isna(row.get('Dimensijas')) else 'N/A',
-                        'dimensions': fedex_info.get('dimensions', 'N/A'),
-                        'recipientCountry': fedex_info.get('recipientCountry', 'N/A'),
-                        'senderContactName': fedex_info.get('senderContactName', 'N/A'),
-                        'productType': printseekers_info.get('productType', 'N/A'),
-                        'productCategory': printseekers_info.get('productCategory', 'N/A'),
-                        'recipient': str(row.get('Sanemejs', '')) if not pd.isna(row.get('Sanemejs')) else '',
-                        'serviceData': str(row.get('Servisa dati', '')) if not pd.isna(row.get('Servisa dati')) else '',
-                        'deliveryZone': str(row.get('Piegades zona', '')) if not pd.isna(row.get('Piegades zona')) else '',
-                        'invoice': str(row.get('Invoice', '')) if not pd.isna(row.get('Invoice')) else ''
-                    }
-                    comparisons.append(comparison)
-
-                return {
-                    "status": "success",
-                    "comparisons": comparisons,
-                    "summary": {
-                        "total_processed": len(comparisons),
-                        "matches_found": len(fedex_data),
-                        "not_found": len(comparisons) - len(fedex_data)
-                    }
-                }
+                except Exception as e:
+                    logger.error(f"Error fetching printseekers_orderi batch: {str(e)}")
+                    continue
                 
-            except Exception as e:
-                logging.error(f"Database error: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-            
+                await asyncio.sleep(DELAY_BETWEEN_BATCHES)
+
+            # Prepare comparison data
+            comparisons = []
+            for _, row in df.iterrows():
+                tracking_number = row['Sutijuma Nr']
+                excel_cost = row['Summa']
+                fedex_info = fedex_data.get(tracking_number, {})
+                printseekers_info = printseekers_data.get(tracking_number, {})
+                
+                def calculate_difference(excel_cost, db_cost):
+                    try:
+                        if excel_cost is None or db_cost is None:
+                            return 'N/A'
+                        excel_value = float(excel_cost)
+                        db_value = float(db_cost)
+                        difference = excel_value - db_value
+                        return 'OK' if abs(difference) < 0.01 else difference
+                    except (ValueError, TypeError):
+                        return 'N/A'
+
+                comparison = {
+                    'trackingNumber': tracking_number,
+                    'excelCost': excel_cost if excel_cost is not None else 'Invalid value',
+                    'databaseCost': fedex_info.get('estimatedShippingCosts', 'Not found'),
+                    'costDifference': calculate_difference(
+                        excel_cost,
+                        fedex_info.get('estimatedShippingCosts')
+                    ),
+                    'serviceType': fedex_info.get('serviceType', 'N/A'),
+                    'excelDimensions': str(row.get('Dimensijas', '')).strip() if not pd.isna(row.get('Dimensijas')) else 'N/A',
+                    'dimensions': fedex_info.get('dimensions', 'N/A'),
+                    'recipientCountry': fedex_info.get('recipientCountry', 'N/A'),
+                    'productType': printseekers_info.get('productType', 'N/A'),
+                    'productCategory': printseekers_info.get('productCategory', 'N/A')
+                }
+                comparisons.append(comparison)
+
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "data": comparisons
+                },
+                status_code=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            logger.error(f"Error processing comparison: {str(e)}", exc_info=True)
+            return JSONResponse(
+                content={
+                    "success": False,
+                    "error": str(e)
+                },
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         finally:
-            if file_path.exists():
-                file_path.unlink()
+            # Clean up temporary file
+            if temp_file_path.exists():
+                temp_file_path.unlink()
                 
     except Exception as e:
-        logging.error(f"Error comparing shipping costs: {str(e)}")
-        raise FileProcessingError(str(e))
+        logger.error(f"Error in compare_shipping_costs: {str(e)}", exc_info=True)
+        return JSONResponse(
+            content={
+                "success": False,
+                "error": str(e)
+            },
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 @app.get("/health")
 async def health_check():
