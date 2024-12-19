@@ -30,14 +30,12 @@ from .utils.error_handlers import (
     handle_file_operation
 )
 
-TEMP_DIR = os.path.join("backend", "temp")
-
-app = FastAPI(title="Batch Processing API")
-settings = get_settings()
-
 # Constants for file handling
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB limit
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file handling
+
+app = FastAPI(title="Batch Processing API")
+settings = get_settings()
 
 # Configure logging at the very start
 logging.basicConfig(
@@ -54,6 +52,9 @@ logger.info(f"Current working directory: {os.getcwd()}")
 logger.info(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
 logger.info(f"PORT: {os.getenv('PORT')}")
 logger.info(f"Directory contents: {os.listdir()}")
+
+# Ensure temp directory exists
+os.makedirs(settings.TEMP_DIR, exist_ok=True)
 
 # Configure CORS for frontend applications
 origins = [
@@ -116,7 +117,7 @@ async def startup_event():
         # Check directories
         dirs_to_check = [
             Path("processed_files/default"),
-            Path("temp")
+            Path(settings.TEMP_DIR)
         ]
         
         for dir_path in dirs_to_check:

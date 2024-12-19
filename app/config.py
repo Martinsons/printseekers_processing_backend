@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Storage Settings
     STORAGE_TYPE: str = "local"
     PROCESSED_DIR: str = "backend/processed_files/default"
+    TEMP_DIR: str = "backend/temp"  # Added TEMP_DIR setting
     
     # Cleanup Settings
     FILE_CLEANUP_HOURS: int = 24
@@ -56,4 +57,3 @@ def get_settings() -> Settings:
         raise Exception(f"Failed to load settings: {str(e)}")
 
 # Constants
-TEMP_DIR = "temp"
