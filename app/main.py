@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.exceptions import RequestValidationError
@@ -257,7 +257,11 @@ async def cleanup_files():
         raise StorageError(str(e))
 
 @app.post("/api/compare-shipping-costs")
-async def compare_shipping_costs(file: UploadFile = File(...)):
+async def compare_shipping_costs(
+    file: UploadFile = File(...),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500)
+):
     try:
         # Validate file
         await validate_upload_file(file)
@@ -387,6 +391,7 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
             comparisons = []
             matches_found = 0
             cost_differences = 0
+            has_differences = []
             
             for _, row in df.iterrows():
                 tracking_number = str(row['Sutijuma Nr']).strip()
@@ -410,33 +415,66 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                         if abs(difference) >= 0.01:
                             nonlocal cost_differences
                             cost_differences += 1
-                        return 'OK' if abs(difference) < 0.01 else difference
+                            return difference
+                        return 'OK'
                     except (ValueError, TypeError):
                         return 'N/A'
 
-                comparison = {
-                    'trackingNumber': tracking_number,
-                    'excelCost': str(excel_cost) if excel_cost is not None else 'Invalid value',
-                    'databaseCost': str(fedex_info.get('estimatedShippingCosts', 'Not found')),
-                    'costDifference': calculate_difference(
-                        excel_cost,
-                        fedex_info.get('estimatedShippingCosts')
-                    ),
-                    'serviceType': str(fedex_info.get('serviceType', 'N/A')),
-                    'excelDimensions': str(row.get('Dimensijas', '')).strip() if not pd.isna(row.get('Dimensijas')) else 'N/A',
-                    'dimensions': str(fedex_info.get('dimensions', 'N/A')),
-                    'recipientCountry': str(fedex_info.get('recipientCountry', 'N/A')),
-                    'productType': str(printseekers_info.get('productType', 'N/A')),
-                    'productCategory': str(printseekers_info.get('productCategory', 'N/A'))
-                }
-                comparisons.append(comparison)
+                cost_diff = calculate_difference(
+                    excel_cost,
+                    fedex_info.get('estimatedShippingCosts')
+                )
+                
+                # Only add to comparisons if there's a difference or it's not found
+                if cost_diff != 'OK' or not fedex_info:
+                    comparison = {
+                        'trackingNumber': tracking_number,
+                        'excelCost': str(excel_cost) if excel_cost is not None else 'Invalid value',
+                        'databaseCost': str(fedex_info.get('estimatedShippingCosts', 'Not found')),
+                        'costDifference': cost_diff,
+                        'serviceType': str(fedex_info.get('serviceType', 'N/A')),
+                        'excelDimensions': str(row.get('Dimensijas', '')).strip() if not pd.isna(row.get('Dimensijas')) else 'N/A',
+                        'dimensions': str(fedex_info.get('dimensions', 'N/A')),
+                        'recipientCountry': str(fedex_info.get('recipientCountry', 'N/A')),
+                        'productType': str(printseekers_info.get('productType', 'N/A')),
+                        'productCategory': str(printseekers_info.get('productCategory', 'N/A'))
+                    }
+                    comparisons.append(comparison)
+
+            # Sort comparisons by cost difference (putting 'N/A' at the end)
+            def sort_key(x):
+                diff = x['costDifference']
+                if diff == 'N/A':
+                    return (1, 0)  # Put N/A at the end
+                if diff == 'OK':
+                    return (0, 0)  # Put OK at the start
+                try:
+                    return (0, abs(float(diff)))  # Sort by absolute difference
+                except:
+                    return (1, 0)  # Treat any errors as N/A
+
+            comparisons.sort(key=sort_key, reverse=True)
+            
+            # Calculate pagination
+            total_items = len(comparisons)
+            total_pages = (total_items + page_size - 1) // page_size
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            
+            paginated_comparisons = comparisons[start_idx:end_idx]
 
             logger.info(f"Comparison completed. Found {matches_found} matches out of {total_rows} records")
             logger.info(f"Cost differences found: {cost_differences}")
             
             response_data = {
                 "success": True,
-                "data": comparisons,
+                "data": paginated_comparisons,
+                "pagination": {
+                    "page": page,
+                    "pageSize": page_size,
+                    "totalItems": total_items,
+                    "totalPages": total_pages
+                },
                 "summary": {
                     "totalProcessed": total_rows,
                     "matchesFound": matches_found,
@@ -446,9 +484,10 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
             }
             
             # Log sample of the response data
-            if comparisons:
-                logger.info(f"Sample comparison (first record): {comparisons[0]}")
+            if paginated_comparisons:
+                logger.info(f"Sample comparison (first record): {paginated_comparisons[0]}")
             logger.info(f"Summary: {response_data['summary']}")
+            logger.info(f"Pagination: {response_data['pagination']}")
             
             return JSONResponse(
                 content=response_data,
