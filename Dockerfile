@@ -35,4 +35,4 @@ RUN mkdir -p temp uploads processed_files/default
 EXPOSE $PORT
 
 # Command to run the application
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "$PORT", "--workers", "2", "--limit-concurrency", "4", "--limit-max-requests", "500", "--timeout-keep-alive", "30", "--backlog", "2048"]
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2 --limit-concurrency 4 --limit-max-requests 500 --timeout-keep-alive 30 --backlog 2048
