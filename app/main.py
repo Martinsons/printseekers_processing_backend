@@ -266,12 +266,14 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
         temp_file_path = Path(settings.TEMP_DIR) / f"compare_costs_{datetime.now().timestamp()}.xlsx"
         
         try:
+            logger.info("Starting file processing")
             # Process file in chunks to avoid memory issues
             with open(temp_file_path, "wb") as temp_file:
                 while chunk := await file.read(CHUNK_SIZE):
                     temp_file.write(chunk)
                     await asyncio.sleep(0)  # Allow other tasks to run
             
+            logger.info("Reading Excel file")
             # Read Excel file with optimized settings
             df = pd.read_excel(
                 temp_file_path,
@@ -279,6 +281,9 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                 dtype={'Sutijuma Nr': str, 'Dimensijas': str},
                 engine='openpyxl'
             )
+            
+            total_rows = len(df)
+            logger.info(f"Processing {total_rows} rows from Excel")
             
             # Validate required columns
             required_columns = ['Sutijuma Nr', 'Summa']
@@ -308,9 +313,16 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
             fedex_data = {}
             printseekers_data = {}
             
+            total_batches = (len(tracking_numbers) + BATCH_SIZE - 1) // BATCH_SIZE
+            processed_batches = 0
+            
+            logger.info("Fetching FedEx data")
             # Fetch data from fedex_orderi
             for i in range(0, len(tracking_numbers), BATCH_SIZE):
                 batch = tracking_numbers[i:i + BATCH_SIZE]
+                processed_batches += 1
+                logger.info(f"Processing FedEx batch {processed_batches}/{total_batches}")
+                
                 try:
                     result = supabaseDb.from_('fedex_orderi') \
                         .select('''
@@ -343,9 +355,14 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                 
                 await asyncio.sleep(DELAY_BETWEEN_BATCHES)
 
+            logger.info("Fetching PrintSeekers data")
+            processed_batches = 0
             # Fetch data from printseekers_orderi
             for i in range(0, len(tracking_numbers), BATCH_SIZE):
                 batch = tracking_numbers[i:i + BATCH_SIZE]
+                processed_batches += 1
+                logger.info(f"Processing PrintSeekers batch {processed_batches}/{total_batches}")
+                
                 try:
                     result = supabaseDb.from_('printseekers_orderi') \
                         .select('TrackingNumber, ProductType, ProductCategory') \
@@ -365,13 +382,20 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                 
                 await asyncio.sleep(DELAY_BETWEEN_BATCHES)
 
+            logger.info("Preparing comparison data")
             # Prepare comparison data
             comparisons = []
+            matches_found = 0
+            cost_differences = 0
+            
             for _, row in df.iterrows():
                 tracking_number = row['Sutijuma Nr']
                 excel_cost = row['Summa']
                 fedex_info = fedex_data.get(tracking_number, {})
                 printseekers_info = printseekers_data.get(tracking_number, {})
+                
+                if fedex_info:
+                    matches_found += 1
                 
                 def calculate_difference(excel_cost, db_cost):
                     try:
@@ -380,6 +404,9 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                         excel_value = float(excel_cost)
                         db_value = float(db_cost)
                         difference = excel_value - db_value
+                        if abs(difference) >= 0.01:
+                            nonlocal cost_differences
+                            cost_differences += 1
                         return 'OK' if abs(difference) < 0.01 else difference
                     except (ValueError, TypeError):
                         return 'N/A'
@@ -401,10 +428,17 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                 }
                 comparisons.append(comparison)
 
+            logger.info("Comparison completed")
             return JSONResponse(
                 content={
                     "success": True,
-                    "data": comparisons
+                    "data": comparisons,
+                    "summary": {
+                        "totalProcessed": total_rows,
+                        "matchesFound": matches_found,
+                        "costDifferences": cost_differences,
+                        "notFound": total_rows - matches_found
+                    }
                 },
                 status_code=status.HTTP_200_OK
             )
@@ -422,6 +456,7 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
             # Clean up temporary file
             if temp_file_path.exists():
                 temp_file_path.unlink()
+                logger.info("Temporary file cleaned up")
                 
     except Exception as e:
         logger.error(f"Error in compare_shipping_costs: {str(e)}", exc_info=True)
