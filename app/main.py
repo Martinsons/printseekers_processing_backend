@@ -37,24 +37,11 @@ CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file handling
 app = FastAPI(title="Batch Processing API")
 settings = get_settings()
 
-# Configure logging at the very start
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
-
-# Log environment information immediately
-logger.info("=== Application Initialization ===")
-logger.info(f"Python version: {sys.version}")
-logger.info(f"Current working directory: {os.getcwd()}")
-logger.info(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
-logger.info(f"PORT: {os.getenv('PORT')}")
-logger.info(f"Directory contents: {os.listdir()}")
-
-# Ensure temp directory exists
-os.makedirs(settings.TEMP_DIR, exist_ok=True)
+# Configure memory optimization settings
+app.conf = {
+    "MAX_CONTENT_LENGTH": MAX_UPLOAD_SIZE,
+    "CHUNK_SIZE": CHUNK_SIZE
+}
 
 # Configure CORS for frontend applications
 origins = [
@@ -155,73 +142,52 @@ async def validate_upload_file(file: UploadFile) -> UploadFile:
 @app.post("/api/process/fedex-bill")
 async def process_fedex_bill(file: UploadFile = File(...)):
     try:
-        # Log the incoming request
-        logger.info(f"Processing file: {file.filename}")
+        # Validate file before processing
+        await validate_upload_file(file)
         
-        # Check file size before processing
-        file.file.seek(0, 2)  # Seek to end
-        size = file.file.tell()
-        file.file.seek(0)  # Reset position
-        
-        if size > MAX_UPLOAD_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE/1024/1024}MB"
-            )
-
-        # Validate file type
-        if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(
-                status_code=400,
-                detail="Only PDF files are allowed"
-            )
-
-        # Create temporary file path
-        temp_file_path = Path(settings.TEMP_DIR) / f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
+        # Create a temporary file to store chunks
+        temp_file_path = Path(settings.UPLOAD_DIR) / f"temp_{datetime.now().timestamp()}.pdf"
         
         try:
-            # Save file in chunks to avoid memory issues
-            with open(temp_file_path, "wb") as buffer:
+            # Process file in chunks to avoid memory issues
+            with open(temp_file_path, "wb") as temp_file:
                 while chunk := await file.read(CHUNK_SIZE):
-                    buffer.write(chunk)
+                    temp_file.write(chunk)
+                    await asyncio.sleep(0)  # Allow other tasks to run
             
-            logger.info(f"File saved temporarily at: {temp_file_path}")
+            # Initialize processor with the temporary file
+            processor = FedexBillProcessor(str(temp_file_path))
             
             # Process the file
-            processor = FedexBillProcessor(str(temp_file_path))
-            result = processor.process()
+            result = await handle_file_operation(
+                lambda: processor.process(),
+                "Error processing FedEx bill"
+            )
             
-            if result.get("error"):
-                raise HTTPException(status_code=400, detail=result["error"])
-            
-            return {
-                "success": True,
-                "data": result
-            }
-            
-        except Exception as e:
-            logger.error(f"Error processing file: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e)
-            }
-        finally:
-            # Clean up temporary file
+            # Clean up the temporary file
             if temp_file_path.exists():
                 temp_file_path.unlink()
-                logger.info(f"Cleaned up temporary file: {temp_file_path}")
-    
-    except HTTPException as he:
-        return {
-            "success": False,
-            "error": he.detail
-        }
+            
+            return JSONResponse(
+                content={
+                    "message": "File processed successfully",
+                    "result": result
+                },
+                status_code=status.HTTP_200_OK
+            )
+            
+        except Exception as e:
+            # Ensure cleanup in case of error
+            if temp_file_path.exists():
+                temp_file_path.unlink()
+            raise
+            
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return {
-            "success": False,
-            "error": f"An unexpected error occurred: {str(e)}"
-        }
+        logger.error(f"Error processing FedEx bill: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 @app.get("/api/download/{file_path:path}")
 async def download_file(file_path: str):
