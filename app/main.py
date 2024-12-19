@@ -37,90 +37,55 @@ CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file handling
 app = FastAPI(title="Batch Processing API")
 settings = get_settings()
 
+# Configure logging at the very start
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
 # Configure memory optimization settings
 app.conf = {
     "MAX_CONTENT_LENGTH": MAX_UPLOAD_SIZE,
     "CHUNK_SIZE": CHUNK_SIZE
 }
 
-# Configure CORS for frontend applications
-origins = [
-    "https://printseekerstest1.netlify.app",  # Production frontend
-    "http://localhost:3000",                   # Local development frontend
-    "http://localhost:5173",                   # Vite default port
-]
-
+# Add CORS middleware with proper configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Replace with your specific origins in production
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "Accept",
-        "Origin",
-        "X-Requested-With",
-    ],
-    expose_headers=["Content-Disposition"],
-    max_age=600,  # Cache preflight requests for 10 minutes
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Configure maximum upload size and trusted hosts
+# Add trusted host middleware
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"]
+    allowed_hosts=["*"]  # Replace with your specific hosts in production
 )
 
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=422,
-        content={"detail": str(exc)},
-    )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": str(exc.detail)},
-    )
+# Ensure temp directory exists
+os.makedirs(settings.TEMP_DIR, exist_ok=True)
 
 # Add these at the top with your other imports
 startup_completed = False
 
 @app.on_event("startup")
 async def startup_event():
-    """Application startup handler with detailed logging"""
     try:
         logger.info("=== Application Startup ===")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
+        logger.info(f"PORT: {os.getenv('PORT')}")
         
-        # Check environment variables
-        required_vars = ['SUPABASE_URL', 'SUPABASE_KEY']
-        for var in required_vars:
-            value = os.getenv(var)
-            logger.info(f"{var} is {'set' if value else 'NOT SET'}")
-
-        # Check directories
-        dirs_to_check = [
-            Path("processed_files/default"),
-            Path(settings.TEMP_DIR)
-        ]
+        # Initialize necessary directories
+        os.makedirs(settings.TEMP_DIR, exist_ok=True)
+        os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
         
-        for dir_path in dirs_to_check:
-            logger.info(f"Checking directory: {dir_path}")
-            try:
-                dir_path.mkdir(parents=True, exist_ok=True)
-                logger.info(f"  Created/verified directory: {dir_path}")
-                logger.info(f"  Exists: {dir_path.exists()}")
-                logger.info(f"  Is directory: {dir_path.is_dir()}")
-                logger.info(f"  Permissions: {oct(dir_path.stat().st_mode)[-3:]}")
-            except Exception as e:
-                logger.error(f"  Error creating directory {dir_path}: {str(e)}")
-
-        global startup_completed
-        startup_completed = True
-        logger.info("Application startup completed successfully")
+        logger.info("Application initialized")
         
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}", exc_info=True)
