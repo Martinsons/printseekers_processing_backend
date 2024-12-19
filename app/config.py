@@ -33,8 +33,9 @@ class Settings(BaseSettings):
     
     # Storage Settings
     STORAGE_TYPE: str = "local"
-    PROCESSED_DIR: str = "backend/processed_files/default"
-    TEMP_DIR: str = "backend/temp"  # Added TEMP_DIR setting
+    PROCESSED_DIR: str = "processed_files/default"
+    TEMP_DIR: str = "temp"
+    UPLOAD_DIR: str = "uploads"
     
     # Cleanup Settings
     FILE_CLEANUP_HOURS: int = 24

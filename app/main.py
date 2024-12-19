@@ -82,8 +82,9 @@ async def startup_event():
         logger.info(f"PORT: {os.getenv('PORT')}")
         
         # Initialize necessary directories
-        os.makedirs(settings.TEMP_DIR, exist_ok=True)
-        os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+        for dir_path in [settings.TEMP_DIR, settings.UPLOAD_DIR, settings.PROCESSED_DIR]:
+            os.makedirs(dir_path, exist_ok=True)
+            logger.info(f"Created/verified directory: {dir_path}")
         
         logger.info("Application initialized")
         
