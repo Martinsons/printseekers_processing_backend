@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.exceptions import RequestValidationError
@@ -30,11 +30,17 @@ from .utils.error_handlers import (
     handle_file_operation
 )
 
-# Constants for file handling
+# Constants for file handling and memory management
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB limit
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file handling
+MAX_CONCURRENT_REQUESTS = 4
+REQUEST_TIMEOUT = 300  # 5 minutes
 
-app = FastAPI(title="Batch Processing API")
+app = FastAPI(
+    title="Batch Processing API",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 settings = get_settings()
 
 # Configure logging at the very start
@@ -48,8 +54,45 @@ logger = logging.getLogger(__name__)
 # Configure memory optimization settings
 app.conf = {
     "MAX_CONTENT_LENGTH": MAX_UPLOAD_SIZE,
-    "CHUNK_SIZE": CHUNK_SIZE
+    "CHUNK_SIZE": CHUNK_SIZE,
+    "MAX_CONCURRENT_REQUESTS": MAX_CONCURRENT_REQUESTS,
+    "REQUEST_TIMEOUT": REQUEST_TIMEOUT
 }
+
+# Add middleware for request limiting
+@app.middleware("http")
+async def limit_concurrent_requests(request: Request, call_next):
+    app.state.active_requests = getattr(app.state, "active_requests", 0)
+    
+    if app.state.active_requests >= MAX_CONCURRENT_REQUESTS:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "error": "Server is busy. Please try again later."
+            }
+        )
+    
+    app.state.active_requests += 1
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        app.state.active_requests -= 1
+
+# Add middleware for request timeout
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    try:
+        return await asyncio.wait_for(call_next(request), timeout=REQUEST_TIMEOUT)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={
+                "success": False,
+                "error": "Request timeout"
+            }
+        )
 
 # Add CORS middleware with proper configuration
 app.add_middleware(

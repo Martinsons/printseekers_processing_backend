@@ -1,1 +1,1 @@
-web: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --limit-concurrency 1 --limit-max-requests 100 --timeout-keep-alive 5 --workers 1
+web: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2 --limit-concurrency 4 --limit-max-requests 500 --timeout-keep-alive 30 --backlog 2048
