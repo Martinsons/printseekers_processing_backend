@@ -389,7 +389,10 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
             cost_differences = 0
             
             for _, row in df.iterrows():
-                tracking_number = row['Sutijuma Nr']
+                tracking_number = str(row['Sutijuma Nr']).strip()
+                if not tracking_number:
+                    continue
+                    
                 excel_cost = row['Summa']
                 fedex_info = fedex_data.get(tracking_number, {})
                 printseekers_info = printseekers_data.get(tracking_number, {})
@@ -403,7 +406,7 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
                             return 'N/A'
                         excel_value = float(excel_cost)
                         db_value = float(db_cost)
-                        difference = excel_value - db_value
+                        difference = round(excel_value - db_value, 2)
                         if abs(difference) >= 0.01:
                             nonlocal cost_differences
                             cost_differences += 1
@@ -413,33 +416,42 @@ async def compare_shipping_costs(file: UploadFile = File(...)):
 
                 comparison = {
                     'trackingNumber': tracking_number,
-                    'excelCost': excel_cost if excel_cost is not None else 'Invalid value',
-                    'databaseCost': fedex_info.get('estimatedShippingCosts', 'Not found'),
+                    'excelCost': str(excel_cost) if excel_cost is not None else 'Invalid value',
+                    'databaseCost': str(fedex_info.get('estimatedShippingCosts', 'Not found')),
                     'costDifference': calculate_difference(
                         excel_cost,
                         fedex_info.get('estimatedShippingCosts')
                     ),
-                    'serviceType': fedex_info.get('serviceType', 'N/A'),
+                    'serviceType': str(fedex_info.get('serviceType', 'N/A')),
                     'excelDimensions': str(row.get('Dimensijas', '')).strip() if not pd.isna(row.get('Dimensijas')) else 'N/A',
-                    'dimensions': fedex_info.get('dimensions', 'N/A'),
-                    'recipientCountry': fedex_info.get('recipientCountry', 'N/A'),
-                    'productType': printseekers_info.get('productType', 'N/A'),
-                    'productCategory': printseekers_info.get('productCategory', 'N/A')
+                    'dimensions': str(fedex_info.get('dimensions', 'N/A')),
+                    'recipientCountry': str(fedex_info.get('recipientCountry', 'N/A')),
+                    'productType': str(printseekers_info.get('productType', 'N/A')),
+                    'productCategory': str(printseekers_info.get('productCategory', 'N/A'))
                 }
                 comparisons.append(comparison)
 
-            logger.info("Comparison completed")
+            logger.info(f"Comparison completed. Found {matches_found} matches out of {total_rows} records")
+            logger.info(f"Cost differences found: {cost_differences}")
+            
+            response_data = {
+                "success": True,
+                "data": comparisons,
+                "summary": {
+                    "totalProcessed": total_rows,
+                    "matchesFound": matches_found,
+                    "costDifferences": cost_differences,
+                    "notFound": total_rows - matches_found
+                }
+            }
+            
+            # Log sample of the response data
+            if comparisons:
+                logger.info(f"Sample comparison (first record): {comparisons[0]}")
+            logger.info(f"Summary: {response_data['summary']}")
+            
             return JSONResponse(
-                content={
-                    "success": True,
-                    "data": comparisons,
-                    "summary": {
-                        "totalProcessed": total_rows,
-                        "matchesFound": matches_found,
-                        "costDifferences": cost_differences,
-                        "notFound": total_rows - matches_found
-                    }
-                },
+                content=response_data,
                 status_code=status.HTTP_200_OK
             )
 
