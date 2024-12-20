@@ -21,7 +21,6 @@ class Settings(BaseSettings):
         "http://localhost:5174",  # Vue dev server alternate port
         "http://localhost:5175",  # Vue dev server alternate port
         "http://localhost:8000",  # Local backend
-        "https://*.onrender.com",  # Render deployed apps
         "https://printseekers-processing-backend.onrender.com",  # Your Render app
         "https://*.netlify.app",  # Netlify deployed frontend
         "https://printseekerstest1.netlify.app"  # Your Netlify app

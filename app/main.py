@@ -97,16 +97,20 @@ async def timeout_middleware(request: Request, call_next):
 # Add CORS middleware with proper configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with your specific origins in production
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 # Add trusted host middleware
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"]  # Replace with your specific hosts in production
+    allowed_hosts=[
+        "localhost",
+        "127.0.0.1",
+        "printseekers-processing-backend.onrender.com"
+    ]
 )
 
 # Ensure temp directory exists
