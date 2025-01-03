@@ -124,32 +124,69 @@ class FedexBillProcessor(BaseProcessor):
 
     def _process_table_row(self, table: list, invoice_number: Optional[str]) -> None:
         """Process a single table row efficiently"""
-        if not table or len(table) < 4:
+        if not table:
             return
 
         try:
-            # Process only if the row contains meaningful data
-            if any(cell and str(cell).strip() for cell in table):
-                # Extract data with proper error handling
-                tracking = str(table[0]).strip() if table[0] else ""
-                recipient = str(table[1]).strip() if table[1] else ""
-                service = str(table[2]).strip() if table[2] else ""
-                amount = self._clean_amount(str(table[3]).strip()) if table[3] else 0.0
-                zone = str(table[4]).strip() if len(table) > 4 and table[4] else ""
-                dimensions = str(table[5]).strip() if len(table) > 5 and table[5] else ""
-                country = str(table[6]).strip() if len(table) > 6 and table[6] else ""
+            # Log table structure for debugging
+            logger.debug(f"Processing table with {len(table)} rows")
+            for row_idx, row in enumerate(table):
+                logger.debug(f"Row {row_idx}: {row}")
 
-                if tracking or recipient:  # Only add if we have at least basic information
-                    self.data["Invoice"].append(invoice_number)
-                    self.data["Sutijuma nr un dimensijas"].append(tracking)
-                    self.data["Sanemejs dati"].append(recipient)
-                    self.data["Servisa dati"].append(service)
-                    self.data["Summa"].append(amount)
-                    self.data["Piegādes zona"].append(zone)
-                    self.data["Dimensijas"].append(dimensions)
-                    self.data["Valsts"].append(country)
+            # Skip header rows
+            if len(table) <= 2:  # Skip if table is too small
+                return
+
+            # Process each row after the header
+            for row in table[2:]:  # Skip first two rows (headers)
+                if not row or not any(cell and str(cell).strip() for cell in row):
+                    continue
+
+                try:
+                    # Extract tracking number and dimensions
+                    tracking_cell = str(row[0]).strip() if row[0] else ""
+                    if not tracking_cell or tracking_cell.lower() in ['tracking number', 'sutijuma nr']:
+                        continue
+
+                    # Extract data with proper error handling
+                    tracking = tracking_cell
+                    recipient = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+                    service = str(row[2]).strip() if len(row) > 2 and row[2] else ""
+                    
+                    # Handle amount - it might be in different columns
+                    amount = 0.0
+                    for col_idx in [3, 4, 5]:  # Check multiple possible columns for amount
+                        if len(row) > col_idx and row[col_idx]:
+                            try:
+                                amount = self._clean_amount(str(row[col_idx]))
+                                if amount > 0:
+                                    break
+                            except:
+                                continue
+
+                    # Extract remaining data
+                    zone = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+                    dimensions = str(row[5]).strip() if len(row) > 5 and row[5] else ""
+                    country = str(row[6]).strip() if len(row) > 6 and row[6] else ""
+
+                    # Only add if we have essential data
+                    if tracking and (recipient or amount > 0):
+                        self.data["Invoice"].append(invoice_number)
+                        self.data["Sutijuma nr un dimensijas"].append(tracking)
+                        self.data["Sanemejs dati"].append(recipient)
+                        self.data["Servisa dati"].append(service)
+                        self.data["Summa"].append(amount)
+                        self.data["Piegādes zona"].append(zone)
+                        self.data["Dimensijas"].append(dimensions)
+                        self.data["Valsts"].append(country)
+                        logger.debug(f"Added row data: {tracking} | {recipient} | {amount}")
+
+                except Exception as e:
+                    logger.error(f"Error processing row in table: {str(e)}")
+                    continue
+
         except Exception as e:
-            logger.error(f"Error processing table row: {str(e)}")
+            logger.error(f"Error processing table: {str(e)}")
 
     def _apply_vat(self) -> None:
         """Apply VAT for EU countries efficiently"""
@@ -185,28 +222,26 @@ class FedexBillProcessor(BaseProcessor):
         Returns:
             list: List of result dictionaries
         """
-        return [
-            {
-                "invoice": inv,
-                "trackingNumber": track,
-                "recipientData": recip,
-                "serviceData": serv,
-                "amount": amt,
-                "deliveryZone": zone,
-                "dimensions": dim,
-                "country": country
-            }
-            for inv, track, recip, serv, amt, zone, dim, country in zip(
-                self.data["Invoice"],
-                self.data["Sutijuma nr un dimensijas"],
-                self.data["Sanemejs dati"],
-                self.data["Servisa dati"],
-                self.data["Summa"],
-                self.data["Piegādes zona"],
-                self.data["Dimensijas"],
-                self.data["Valsts"]
-            )
-        ]
+        result_data = []
+        for i in range(len(self.data["Invoice"])):
+            try:
+                row_data = {
+                    "invoice": self.data["Invoice"][i],
+                    "trackingNumber": self.data["Sutijuma nr un dimensijas"][i],
+                    "recipientData": self.data["Sanemejs dati"][i],
+                    "serviceData": self.data["Servisa dati"][i],
+                    "amount": str(self.data["Summa"][i]),  # Convert to string for consistency
+                    "deliveryZone": self.data["Piegādes zona"][i],
+                    "dimensions": self.data["Dimensijas"][i],
+                    "country": self.data["Valsts"][i]
+                }
+                result_data.append(row_data)
+            except Exception as e:
+                logger.error(f"Error preparing row {i} data: {str(e)}")
+                continue
+        
+        logger.info(f"Prepared {len(result_data)} rows of data for return")
+        return result_data
 
     def process(self) -> Dict[str, Any]:
         """
@@ -259,14 +294,15 @@ class FedexBillProcessor(BaseProcessor):
                                 
                             logger.info(f"Found {len(tables)} tables on page {page_num + 1}")
                             for table_num, table in enumerate(tables, 1):
-                                if len(table) > 3 and len(table[0]) > 8:
+                                logger.debug(f"Table {table_num} structure: {len(table)} rows")
+                                if table and len(table) > 2:  
                                     self._process_table_row(table, invoice_number)
                                     logger.debug(f"Processed table {table_num} on page {page_num + 1}")
                                 del table
                             del tables
                         except Exception as e:
                             logger.error(f"Error processing page {page_num + 1}: {str(e)}")
-                            continue  # Continue with next page instead of failing completely
+                            continue
                         finally:
                             page.flush_cache()
                             del page
@@ -330,13 +366,27 @@ class FedexBillProcessor(BaseProcessor):
             
             self.processed_files['analysis_file'] = relative_path
             
+            # Prepare the return data
+            processed_data = self._prepare_result_data()
+            if not processed_data:
+                logger.error("No data was processed successfully")
+                return {
+                    "status": "error",
+                    "error": "No data could be extracted from the PDF"
+                }
+            
             total_time = time.time() - start_time
             logger.info(f"Processing completed in {total_time:.2f} seconds")
+            logger.info(f"Returning {len(processed_data)} rows of data")
 
             return {
                 "status": "success",
                 "files": self.processed_files,
-                "data": self._prepare_result_data()
+                "data": processed_data,
+                "summary": {
+                    "total_rows": len(processed_data),
+                    "processing_time": f"{total_time:.2f} seconds"
+                }
             }
 
         except Exception as e:
