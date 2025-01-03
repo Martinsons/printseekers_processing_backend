@@ -173,11 +173,9 @@ class FedexBillProcessor(BaseProcessor):
         output_filename = f'fedex_bill_analysis_{self.timestamp}.xlsx'
         output_path = self.output_dir / output_filename
         
-        # Use optimal Excel writing settings
-        writer = pd.ExcelWriter(output_path, engine='openpyxl')
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
-        writer.save()
-        writer.close()
+        # Use context manager for proper resource handling
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Sheet1')
         
         return str(output_path.relative_to(self.processed_dir))
 

@@ -1,5 +1,6 @@
 from fastapi import HTTPException, status
 from typing import Optional
+import asyncio
 
 class FileProcessingError(HTTPException):
     def __init__(self, detail: str):
@@ -29,9 +30,11 @@ class StorageError(HTTPException):
             detail=detail
         )
 
-def handle_file_operation(operation: callable, error_msg: str, *args, **kwargs):
+async def handle_file_operation(operation: callable, error_msg: str, *args, **kwargs):
     """Generic error handler for file operations"""
     try:
+        if asyncio.iscoroutinefunction(operation):
+            return await operation(*args, **kwargs)
         return operation(*args, **kwargs)
     except FileNotFoundError as e:
         raise FileNotFoundError(str(e))

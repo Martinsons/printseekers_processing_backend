@@ -171,11 +171,9 @@ async def process_fedex_bill(file: UploadFile = File(...)):
             # Initialize processor with the temporary file
             processor = FedexBillProcessor(str(temp_file_path))
             
-            # Process the file
-            result = await handle_file_operation(
-                lambda: processor.process(),
-                "Error processing FedEx bill"
-            )
+            # Process the file in a thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, processor.process)
             
             # Clean up the temporary file
             if temp_file_path.exists():
