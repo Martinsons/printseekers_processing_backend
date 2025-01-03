@@ -9,6 +9,11 @@ import re
 from typing import Dict, Any, Optional
 import gc
 import resource
+import time
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Set memory limit (1GB)
 resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, -1))
@@ -36,7 +41,10 @@ OTHER_EUROPEAN_COUNTRIES = {
 EUROPEAN_COUNTRIES = EU_COUNTRIES | OTHER_EUROPEAN_COUNTRIES
 
 class FedexBillProcessor(BaseProcessor):
-    CHUNK_SIZE = 10  # Number of pages to process at once
+    CHUNK_SIZE = 5  # Number of pages to process at once
+    PAGE_TIMEOUT = 30  # Timeout in seconds for processing a single page
+    TEST_MODE = True  # Set to True to process only first few pages
+    TEST_PAGES = 3  # Number of pages to process in test mode
     
     def __init__(self, input_file: str, user_id: str = "default"):
         super().__init__(input_file, user_id)
@@ -115,58 +123,33 @@ class FedexBillProcessor(BaseProcessor):
             return 0.0
 
     def _process_table_row(self, table: list, invoice_number: Optional[str]) -> None:
-        """
-        Process a single table row efficiently
-        Args:
-            table (list): Table data
-            invoice_number (Optional[str]): Invoice number
-        """
+        """Process a single table row efficiently"""
+        if not table or len(table) < 4:
+            return
+
         try:
-            # Basic validation
-            if len(table) <= 3 or len(table[0]) <= 8:
-                return
+            # Process only if the row contains meaningful data
+            if any(cell and str(cell).strip() for cell in table):
+                # Extract data with proper error handling
+                tracking = str(table[0]).strip() if table[0] else ""
+                recipient = str(table[1]).strip() if table[1] else ""
+                service = str(table[2]).strip() if table[2] else ""
+                amount = self._clean_amount(str(table[3]).strip()) if table[3] else 0.0
+                zone = str(table[4]).strip() if len(table) > 4 and table[4] else ""
+                dimensions = str(table[5]).strip() if len(table) > 5 and table[5] else ""
+                country = str(table[6]).strip() if len(table) > 6 and table[6] else ""
 
-            # Extract tracking number and dimensions
-            sutijuma_data = table[1][0]
-            tracking_number = ''.join(filter(str.isdigit, sutijuma_data.split()[0]))
-            
-            dimensijas_index = sutijuma_data.find("Dimensijas")
-            dimensions = (sutijuma_data[dimensijas_index + len("Dimensijas"):].strip() 
-                        if dimensijas_index != -1 else "")
-
-            # Process recipient data
-            sanemejs_data = table[2][3].split()
-            country = sanemejs_data[-1] if sanemejs_data else ""
-            recipient = ' '.join(sanemejs_data[1:4] if len(sanemejs_data) > 3 else sanemejs_data[1:])
-            recipient = ''.join(c for c in recipient if not c.isdigit()).strip()
-
-            # Process service data
-            service_data = table[1][3].replace('Aprēķinātais svars', '').replace('kg', '').strip()
-            service_data = ''.join(c for c in service_data if not c.isdigit()).strip().replace(',', '')
-
-            # Process amount
-            amount_str = table[3][8].replace('Kopā EUR', '').strip()
-            amount = self._clean_amount(amount_str)
-
-            # Process delivery zone
-            delivery_zone = ""
-            zone_text = table[2][4]
-            if "Attālinātā piegādes zona" in zone_text:
-                delivery_zone = zone_text.split("Attālinātā piegādes zona", 1)[1].strip().split('\n')[0].strip()
-
-            # Append all data
-            self.data["Invoice"].append(invoice_number or "Not found")
-            self.data["Sutijuma nr un dimensijas"].append(tracking_number)
-            self.data["Dimensijas"].append(dimensions)
-            self.data["Valsts"].append(country)
-            self.data["Sanemejs dati"].append(recipient)
-            self.data["Servisa dati"].append(service_data)
-            self.data["Summa"].append(str(amount))
-            self.data["Piegādes zona"].append(delivery_zone)
-
+                if tracking or recipient:  # Only add if we have at least basic information
+                    self.data["Invoice"].append(invoice_number)
+                    self.data["Sutijuma nr un dimensijas"].append(tracking)
+                    self.data["Sanemejs dati"].append(recipient)
+                    self.data["Servisa dati"].append(service)
+                    self.data["Summa"].append(amount)
+                    self.data["Piegādes zona"].append(zone)
+                    self.data["Dimensijas"].append(dimensions)
+                    self.data["Valsts"].append(country)
         except Exception as e:
-            logging.error(f"Error processing table row: {str(e)}")
-            raise
+            logger.error(f"Error processing table row: {str(e)}")
 
     def _apply_vat(self) -> None:
         """Apply VAT for EU countries efficiently"""
@@ -234,49 +217,88 @@ class FedexBillProcessor(BaseProcessor):
             Dict[str, Any]: Processing results
         """
         try:
+            logger.info("Starting FedEx bill processing")
+            start_time = time.time()
+            
+            logger.info("Validating data...")
             self.validate_data()
             
-            # Process PDF in a context manager to ensure proper cleanup
             with pdfplumber.open(self.input_file) as pdf:
-                # Get invoice number from first page
+                logger.info(f"Opened PDF with {len(pdf.pages)} pages")
+                
+                logger.info("Extracting invoice number from first page")
                 first_page = pdf.pages[0]
                 invoice_number = self._extract_invoice_number(first_page.extract_text())
+                logger.info(f"Found invoice number: {invoice_number}")
                 first_page.flush_cache()
                 del first_page
 
-                # Process pages in smaller chunks
                 total_pages = len(pdf.pages)
+                if self.TEST_MODE:
+                    total_pages = min(total_pages, self.TEST_PAGES)
+                    logger.info(f"TEST MODE: Processing only first {total_pages} pages")
+                
+                logger.info(f"Processing {total_pages} pages in chunks of {self.CHUNK_SIZE}")
+                
                 for i in range(0, total_pages, self.CHUNK_SIZE):
+                    chunk_start = time.time()
+                    logger.info(f"Processing chunk {i//self.CHUNK_SIZE + 1}/{(total_pages + self.CHUNK_SIZE - 1)//self.CHUNK_SIZE}")
                     chunk_pages = pdf.pages[i:i + self.CHUNK_SIZE]
                     
-                    for page in chunk_pages:
+                    for page_num, page in enumerate(chunk_pages, start=i):
+                        page_start = time.time()
                         try:
+                            if time.time() - page_start > self.PAGE_TIMEOUT:
+                                logger.warning(f"Timeout processing page {page_num + 1}")
+                                continue
+                                
+                            logger.info(f"Processing page {page_num + 1}/{total_pages}")
                             tables = page.extract_tables()
-                            if tables:
-                                for table in tables:
-                                    if len(table) > 3 and len(table[0]) > 8:
-                                        self._process_table_row(table, invoice_number)
-                                    del table
+                            
+                            if not tables:
+                                logger.info(f"No tables found on page {page_num + 1}")
+                                continue
+                                
+                            logger.info(f"Found {len(tables)} tables on page {page_num + 1}")
+                            for table_num, table in enumerate(tables, 1):
+                                if len(table) > 3 and len(table[0]) > 8:
+                                    self._process_table_row(table, invoice_number)
+                                    logger.debug(f"Processed table {table_num} on page {page_num + 1}")
+                                del table
                             del tables
+                        except Exception as e:
+                            logger.error(f"Error processing page {page_num + 1}: {str(e)}")
+                            continue  # Continue with next page instead of failing completely
                         finally:
                             page.flush_cache()
                             del page
+                            
+                        if time.time() - page_start > self.PAGE_TIMEOUT:
+                            logger.warning(f"Page {page_num + 1} processing exceeded timeout")
                     
-                    # Force garbage collection after each chunk
+                    chunk_time = time.time() - chunk_start
+                    logger.info(f"Chunk processed in {chunk_time:.2f} seconds")
                     gc.collect()
 
-            if not any(self.data.values()):
+            row_count = len(self.data["Invoice"])
+            if row_count == 0:
+                logger.error("No valid data found in PDF")
                 raise ValueError("No valid data found in PDF")
+            else:
+                logger.info(f"Successfully processed {row_count} rows of data")
 
-            # Apply VAT and prepare data
+            logger.info("Applying VAT calculations")
             self._apply_vat()
 
             # Create DataFrame in chunks to minimize memory usage
+            logger.info("Creating DataFrame from processed data")
             chunk_size = 1000
             dfs = []
             data_length = len(self.data["Invoice"])
+            logger.info(f"Total rows to process: {data_length}")
             
             for i in range(0, data_length, chunk_size):
+                logger.info(f"Processing DataFrame chunk {i//chunk_size + 1}/{(data_length + chunk_size - 1)//chunk_size}")
                 chunk_data = {
                     k: v[i:i + chunk_size] 
                     for k, v in self.data.items()
@@ -286,10 +308,12 @@ class FedexBillProcessor(BaseProcessor):
                 del chunk_data
                 gc.collect()
 
+            logger.info("Concatenating DataFrame chunks")
             df = pd.concat(dfs, ignore_index=True)
             del dfs
             gc.collect()
 
+            logger.info("Renaming DataFrame columns")
             df = df.rename(columns={
                 "Invoice": "Invoice",
                 "Sutijuma nr un dimensijas": "Sutijuma Nr",
@@ -301,12 +325,15 @@ class FedexBillProcessor(BaseProcessor):
                 "Valsts": "Valsts"
             })
 
-            # Save to Excel and prepare response
+            logger.info("Saving to Excel")
             relative_path = self._save_to_excel(df)
             del df
             gc.collect()
             
             self.processed_files['analysis_file'] = relative_path
+            
+            total_time = time.time() - start_time
+            logger.info(f"Processing completed in {total_time:.2f} seconds")
 
             return {
                 "status": "success",
@@ -315,12 +342,12 @@ class FedexBillProcessor(BaseProcessor):
             }
 
         except Exception as e:
-            logging.error(f"Error processing FedEx bill: {str(e)}")
+            logger.error(f"Error processing FedEx bill: {str(e)}", exc_info=True)
             return {
                 "status": "error",
                 "error": str(e)
             }
         finally:
-            # Clean up
+            logger.info("Cleaning up resources")
             self._initialize_data()
             gc.collect()
