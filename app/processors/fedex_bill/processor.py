@@ -7,19 +7,6 @@ import os
 import logging
 import re
 from typing import Dict, Any, Optional
-import gc
-import resource
-import time
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Set memory limit (1GB)
-resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, -1))
-
-# Configure garbage collection for more aggressive collection
-gc.set_threshold(50, 3, 3)
 
 # European Union country codes (excluding Norway, Switzerland, and Gibraltar)
 EU_COUNTRIES = {
@@ -41,39 +28,25 @@ OTHER_EUROPEAN_COUNTRIES = {
 EUROPEAN_COUNTRIES = EU_COUNTRIES | OTHER_EUROPEAN_COUNTRIES
 
 class FedexBillProcessor(BaseProcessor):
-    CHUNK_SIZE = 5  # Number of pages to process at once
-    PAGE_TIMEOUT = 30  # Timeout in seconds for processing a single page
-    TEST_MODE = True  # Set to True to process only first few pages
-    TEST_PAGES = 3  # Number of pages to process in test mode
-    
     def __init__(self, input_file: str, user_id: str = "default"):
         super().__init__(input_file, user_id)
         self.today_date = datetime.now().strftime("%d-%m-%Y")
         self.timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
         self.processed_files = {}
-        self._initialize_data()
-
-    def _initialize_data(self) -> None:
-        """Initialize data structure with minimal memory footprint"""
-        self.data = {
-            "Invoice": [],
-            "Sutijuma nr un dimensijas": [],
-            "Sanemejs dati": [],
-            "Servisa dati": [],
-            "Summa": [],
-            "Piegādes zona": [],
-            "Dimensijas": [],
-            "Valsts": []
-        }
+        
+        # The output_dir is already set by the parent class
+        self.temp_dir = self.temp_dir
+        self.temp_dir.mkdir(exist_ok=True)
 
     def _load_file(self) -> None:
-        """Validate file format"""
+        """Override parent's _load_file method since we're dealing with PDFs"""
         if not str(self.input_file).lower().endswith('.pdf'):
             raise ValueError("Invalid file format. Please upload a PDF file.")
+        return None
 
     def validate_data(self) -> bool:
         """
-        Validate PDF content with minimal memory usage
+        Override abstract method to validate the PDF file
         Returns:
             bool: True if valid, raises ValueError if invalid
         """
@@ -83,236 +56,136 @@ class FedexBillProcessor(BaseProcessor):
                 text = first_page.extract_text()
                 if not text or 'FedEx Express Latvia SIA' not in text:
                     raise ValueError("This does not appear to be a valid FedEx bill")
-                first_page.flush_cache()
-                del text
-                gc.collect()
             return True
         except Exception as e:
             logging.error(f"Validation error: {str(e)}")
-            raise ValueError(f"Invalid FedEx bill format: {str(e)}")
+            raise ValueError("Invalid FedEx bill format")
 
     def _extract_invoice_number(self, text: str) -> Optional[str]:
         """
-        Extract invoice number efficiently
+        Extract invoice number from the PDF text.
         Args:
             text (str): The text content of the PDF page
         Returns:
             Optional[str]: The invoice number if found, None otherwise
         """
         try:
+            # Look for "Rēķina numurs:" followed by numbers
             match = re.search(r"Rēķina numurs:\s*(\d+)", text)
-            return match.group(1) if match else None
+            if match:
+                return match.group(1)
+            return None
         except Exception as e:
             logging.error(f"Error extracting invoice number: {str(e)}")
             return None
 
-    def _clean_amount(self, amount_str: str) -> float:
-        """
-        Clean and convert amount string to float
-        Args:
-            amount_str (str): Amount string to clean
-        Returns:
-            float: Cleaned amount
-        """
-        try:
-            # Remove spaces and convert European format to standard
-            cleaned = amount_str.replace(' ', '').replace('.', '').replace(',', '.')
-            amount = float(cleaned)
-            return amount if not pd.isna(amount) else 0.0
-        except (ValueError, AttributeError):
-            return 0.0
-
-    def _process_table_row(self, table: list, invoice_number: Optional[str]) -> None:
-        """Process a single table row efficiently"""
-        if not table or len(table) < 4:
-            return
-
-        try:
-            # Process only if the row contains meaningful data
-            if any(cell and str(cell).strip() for cell in table):
-                # Extract data with proper error handling
-                tracking = str(table[0]).strip() if table[0] else ""
-                recipient = str(table[1]).strip() if table[1] else ""
-                service = str(table[2]).strip() if table[2] else ""
-                amount = self._clean_amount(str(table[3]).strip()) if table[3] else 0.0
-                zone = str(table[4]).strip() if len(table) > 4 and table[4] else ""
-                dimensions = str(table[5]).strip() if len(table) > 5 and table[5] else ""
-                country = str(table[6]).strip() if len(table) > 6 and table[6] else ""
-
-                if tracking or recipient:  # Only add if we have at least basic information
-                    self.data["Invoice"].append(invoice_number)
-                    self.data["Sutijuma nr un dimensijas"].append(tracking)
-                    self.data["Sanemejs dati"].append(recipient)
-                    self.data["Servisa dati"].append(service)
-                    self.data["Summa"].append(amount)
-                    self.data["Piegādes zona"].append(zone)
-                    self.data["Dimensijas"].append(dimensions)
-                    self.data["Valsts"].append(country)
-        except Exception as e:
-            logger.error(f"Error processing table row: {str(e)}")
-
-    def _apply_vat(self) -> None:
-        """Apply VAT for EU countries efficiently"""
-        for i, (amount, country) in enumerate(zip(self.data["Summa"], self.data["Valsts"])):
-            try:
-                amt = float(amount)
-                if country.upper() in EU_COUNTRIES:
-                    amt = round(amt * 1.21, 2)
-                self.data["Summa"][i] = str(amt)
-            except (ValueError, AttributeError):
-                self.data["Summa"][i] = "0.0"
-
-    def _save_to_excel(self, df: pd.DataFrame) -> str:
-        """
-        Save DataFrame to Excel efficiently
-        Args:
-            df (pd.DataFrame): DataFrame to save
-        Returns:
-            str: Relative path to saved file
-        """
-        output_filename = f'fedex_bill_analysis_{self.timestamp}.xlsx'
-        output_path = self.output_dir / output_filename
-        
-        # Use context manager for proper resource handling
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Sheet1')
-        
-        return str(output_path.relative_to(self.processed_dir))
-
-    def _prepare_result_data(self) -> list:
-        """
-        Prepare result data efficiently
-        Returns:
-            list: List of result dictionaries
-        """
-        return [
-            {
-                "invoice": inv,
-                "trackingNumber": track,
-                "recipientData": recip,
-                "serviceData": serv,
-                "amount": amt,
-                "deliveryZone": zone,
-                "dimensions": dim,
-                "country": country
-            }
-            for inv, track, recip, serv, amt, zone, dim, country in zip(
-                self.data["Invoice"],
-                self.data["Sutijuma nr un dimensijas"],
-                self.data["Sanemejs dati"],
-                self.data["Servisa dati"],
-                self.data["Summa"],
-                self.data["Piegādes zona"],
-                self.data["Dimensijas"],
-                self.data["Valsts"]
-            )
-        ]
-
     def process(self) -> Dict[str, Any]:
         """
-        Process the FedEx bill PDF with optimal memory usage
+        Override abstract method to process the FedEx bill PDF
         Returns:
-            Dict[str, Any]: Processing results
+            Dict[str, Any]: Processing results with status and data
         """
         try:
-            logger.info("Starting FedEx bill processing")
-            start_time = time.time()
-            
-            logger.info("Validating data...")
             self.validate_data()
-            
+
+            data = {
+                "Invoice": [],
+                "Sutijuma nr un dimensijas": [],
+                "Sanemejs dati": [],
+                "Servisa dati": [],
+                "Summa": [],
+                "Piegādes zona": [],
+                "Dimensijas": [],
+                "Valsts": []
+            }
+
             with pdfplumber.open(self.input_file) as pdf:
-                logger.info(f"Opened PDF with {len(pdf.pages)} pages")
-                
-                logger.info("Extracting invoice number from first page")
+                # Extract invoice number from first page
                 first_page = pdf.pages[0]
-                invoice_number = self._extract_invoice_number(first_page.extract_text())
-                logger.info(f"Found invoice number: {invoice_number}")
-                first_page.flush_cache()
-                del first_page
-
-                total_pages = len(pdf.pages)
-                if self.TEST_MODE:
-                    total_pages = min(total_pages, self.TEST_PAGES)
-                    logger.info(f"TEST MODE: Processing only first {total_pages} pages")
+                first_page_text = first_page.extract_text()
+                invoice_number = self._extract_invoice_number(first_page_text)
                 
-                logger.info(f"Processing {total_pages} pages in chunks of {self.CHUNK_SIZE}")
+                if not invoice_number:
+                    logging.warning("Could not find invoice number in the PDF")
                 
-                for i in range(0, total_pages, self.CHUNK_SIZE):
-                    chunk_start = time.time()
-                    logger.info(f"Processing chunk {i//self.CHUNK_SIZE + 1}/{(total_pages + self.CHUNK_SIZE - 1)//self.CHUNK_SIZE}")
-                    chunk_pages = pdf.pages[i:i + self.CHUNK_SIZE]
-                    
-                    for page_num, page in enumerate(chunk_pages, start=i):
-                        page_start = time.time()
-                        try:
-                            if time.time() - page_start > self.PAGE_TIMEOUT:
-                                logger.warning(f"Timeout processing page {page_num + 1}")
-                                continue
-                                
-                            logger.info(f"Processing page {page_num + 1}/{total_pages}")
-                            tables = page.extract_tables()
-                            
-                            if not tables:
-                                logger.info(f"No tables found on page {page_num + 1}")
-                                continue
-                                
-                            logger.info(f"Found {len(tables)} tables on page {page_num + 1}")
-                            for table_num, table in enumerate(tables, 1):
-                                if len(table) > 3 and len(table[0]) > 8:
-                                    self._process_table_row(table, invoice_number)
-                                    logger.debug(f"Processed table {table_num} on page {page_num + 1}")
-                                del table
-                            del tables
-                        except Exception as e:
-                            logger.error(f"Error processing page {page_num + 1}: {str(e)}")
-                            continue  # Continue with next page instead of failing completely
-                        finally:
-                            page.flush_cache()
-                            del page
-                            
-                        if time.time() - page_start > self.PAGE_TIMEOUT:
-                            logger.warning(f"Page {page_num + 1} processing exceeded timeout")
-                    
-                    chunk_time = time.time() - chunk_start
-                    logger.info(f"Chunk processed in {chunk_time:.2f} seconds")
-                    gc.collect()
+                for page in pdf.pages:
+                    tables = page.extract_tables()
 
-            row_count = len(self.data["Invoice"])
-            if row_count == 0:
-                logger.error("No valid data found in PDF")
+                    for table in tables:
+                        if len(table) > 3 and len(table[0]) > 8:
+                            try:
+                                # Add invoice number to each row
+                                data["Invoice"].append(invoice_number or "Not found")
+                                
+                                sutijuma_nr_un_dimensijas_value = table[1][0]
+                                
+                                # Extract tracking number
+                                sutijuma_nr = ''.join(filter(str.isdigit, sutijuma_nr_un_dimensijas_value.split()[0]))
+                                data["Sutijuma nr un dimensijas"].append(sutijuma_nr)
+                                
+                                # Extract dimensions
+                                dimensijas_index = sutijuma_nr_un_dimensijas_value.find("Dimensijas")
+                                if dimensijas_index != -1:
+                                    dimensijas_value = sutijuma_nr_un_dimensijas_value[dimensijas_index + len("Dimensijas"):].strip()
+                                    data["Dimensijas"].append(dimensijas_value)
+                                else:
+                                    data["Dimensijas"].append("")
+
+                                # Extract recipient data and country
+                                sanemejs_dati_value = table[2][3]
+                                sanemejs_dati_words = sanemejs_dati_value.split()
+                                
+                                valsts_value = sanemejs_dati_words[-1] if sanemejs_dati_words else ""
+                                data["Valsts"].append(valsts_value)
+                                
+                                if len(sanemejs_dati_words) > 3:
+                                    sanemejs_dati_value = ' '.join(sanemejs_dati_words[1:4])
+                                else:
+                                    sanemejs_dati_value = ' '.join(sanemejs_dati_words[1:])
+                                sanemejs_dati_value = ''.join(filter(lambda x: not x.isdigit(), sanemejs_dati_value)).strip()
+                                data["Sanemejs dati"].append(sanemejs_dati_value)
+
+                                # Extract service data
+                                servisa_dati_value = table[1][3].replace('Aprēķinātais svars', '').replace('kg', '').strip()
+                                servisa_dati_value = ''.join(filter(lambda x: not x.isdigit(), servisa_dati_value)).strip()
+                                servisa_dati_value = servisa_dati_value.replace(',', '')
+                                data["Servisa dati"].append(servisa_dati_value)
+
+                                # Extract amount
+                                summa_value = table[3][8].replace('Kopā EUR', '').strip()
+                                data["Summa"].append(summa_value)
+
+                                # Extract delivery zone
+                                if "Attālinātā piegādes zona" in table[2][4]:
+                                    piegades_zona_value = table[2][4].split("Attālinātā piegādes zona", 1)[1].strip().split('\n')[0].strip()
+                                    data["Piegādes zona"].append(piegades_zona_value)
+                                else:
+                                    data["Piegādes zona"].append("")
+
+                            except Exception as e:
+                                logging.error(f"Error processing table row: {str(e)}")
+                                continue
+
+            if not any(data.values()):
                 raise ValueError("No valid data found in PDF")
-            else:
-                logger.info(f"Successfully processed {row_count} rows of data")
 
-            logger.info("Applying VAT calculations")
-            self._apply_vat()
+            # Apply VAT for EU countries before creating DataFrame
+            for i in range(len(data["Summa"])):
+                amount = data["Summa"][i]
+                try:
+                    amount = float(amount.replace(',', '.').replace(' ', ''))
+                    country = data["Valsts"][i].upper()
+                    if country in EU_COUNTRIES:
+                        amount = round(amount * 1.21, 2)
+                    data["Summa"][i] = str(amount)
+                except (ValueError, AttributeError):
+                    continue
 
-            # Create DataFrame in chunks to minimize memory usage
-            logger.info("Creating DataFrame from processed data")
-            chunk_size = 1000
-            dfs = []
-            data_length = len(self.data["Invoice"])
-            logger.info(f"Total rows to process: {data_length}")
-            
-            for i in range(0, data_length, chunk_size):
-                logger.info(f"Processing DataFrame chunk {i//chunk_size + 1}/{(data_length + chunk_size - 1)//chunk_size}")
-                chunk_data = {
-                    k: v[i:i + chunk_size] 
-                    for k, v in self.data.items()
-                }
-                df_chunk = pd.DataFrame(chunk_data)
-                dfs.append(df_chunk)
-                del chunk_data
-                gc.collect()
+            # Create DataFrame and save to Excel
+            df = pd.DataFrame(data)
 
-            logger.info("Concatenating DataFrame chunks")
-            df = pd.concat(dfs, ignore_index=True)
-            del dfs
-            gc.collect()
-
-            logger.info("Renaming DataFrame columns")
-            df = df.rename(columns={
+            # Define new column names
+            column_mapping = {
                 "Invoice": "Invoice",
                 "Sutijuma nr un dimensijas": "Sutijuma Nr",
                 "Sanemejs dati": "Sanemejs",
@@ -321,31 +194,51 @@ class FedexBillProcessor(BaseProcessor):
                 "Piegādes zona": "Piegades zona",
                 "Dimensijas": "Dimensijas",
                 "Valsts": "Valsts"
-            })
+            }
 
-            logger.info("Saving to Excel")
-            relative_path = self._save_to_excel(df)
-            del df
-            gc.collect()
+            # Rename the columns
+            df = df.rename(columns=column_mapping)
             
-            self.processed_files['analysis_file'] = relative_path
+            output_filename = f'fedex_bill_analysis_{self.timestamp}.xlsx'
+            output_path = self.output_dir / output_filename
             
-            total_time = time.time() - start_time
-            logger.info(f"Processing completed in {total_time:.2f} seconds")
+            # Save Excel file with index=False
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            
+            # Store relative path for the API response
+            relative_path = output_path.relative_to(self.processed_dir)
+            self.processed_files['analysis_file'] = str(relative_path)
+
+            # Prepare response data with invoice number
+            result_data = []
+            for i in range(len(data["Sutijuma nr un dimensijas"])):
+                # Get the amount and convert to float
+                amount = data["Summa"][i]
+                try:
+                    amount = float(amount.replace(',', '.').replace(' ', ''))
+                except (ValueError, AttributeError):
+                    amount = 0.0
+                
+                result_data.append({
+                    "invoice": data["Invoice"][i],
+                    "trackingNumber": data["Sutijuma nr un dimensijas"][i],
+                    "recipientData": data["Sanemejs dati"][i],
+                    "serviceData": data["Servisa dati"][i],
+                    "amount": str(amount),  
+                    "deliveryZone": data["Piegādes zona"][i],
+                    "dimensions": data["Dimensijas"][i],
+                    "country": data["Valsts"][i]
+                })
 
             return {
                 "status": "success",
                 "files": self.processed_files,
-                "data": self._prepare_result_data()
+                "data": result_data
             }
 
         except Exception as e:
-            logger.error(f"Error processing FedEx bill: {str(e)}", exc_info=True)
+            logging.error(f"Error processing FedEx bill: {str(e)}")
             return {
                 "status": "error",
                 "error": str(e)
             }
-        finally:
-            logger.info("Cleaning up resources")
-            self._initialize_data()
-            gc.collect()

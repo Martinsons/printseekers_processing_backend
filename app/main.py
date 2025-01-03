@@ -545,6 +545,7 @@ async def health_check():
         )
 
 @app.get("/")
+@app.head("/")
 async def root():
     """Root endpoint providing API information"""
     return {
