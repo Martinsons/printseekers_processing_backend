@@ -10,11 +10,11 @@ from typing import Dict, Any, Optional
 import gc
 import resource
 
-# Set memory limit (450MB)
-resource.setrlimit(resource.RLIMIT_AS, (450 * 1024 * 1024, -1))
+# Set memory limit (1GB)
+resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, -1))
 
-# Configure garbage collection
-gc.set_threshold(100, 5, 5)
+# Configure garbage collection for more aggressive collection
+gc.set_threshold(50, 3, 3)
 
 # European Union country codes (excluding Norway, Switzerland, and Gibraltar)
 EU_COUNTRIES = {
@@ -236,23 +236,31 @@ class FedexBillProcessor(BaseProcessor):
         try:
             self.validate_data()
             
+            # Process PDF in a context manager to ensure proper cleanup
             with pdfplumber.open(self.input_file) as pdf:
                 # Get invoice number from first page
                 first_page = pdf.pages[0]
                 invoice_number = self._extract_invoice_number(first_page.extract_text())
                 first_page.flush_cache()
+                del first_page
 
-                # Process pages in chunks
+                # Process pages in smaller chunks
                 total_pages = len(pdf.pages)
                 for i in range(0, total_pages, self.CHUNK_SIZE):
                     chunk_pages = pdf.pages[i:i + self.CHUNK_SIZE]
                     
                     for page in chunk_pages:
-                        tables = page.extract_tables()
-                        for table in tables:
-                            if len(table) > 3 and len(table[0]) > 8:
-                                self._process_table_row(table, invoice_number)
-                        page.flush_cache()
+                        try:
+                            tables = page.extract_tables()
+                            if tables:
+                                for table in tables:
+                                    if len(table) > 3 and len(table[0]) > 8:
+                                        self._process_table_row(table, invoice_number)
+                                    del table
+                            del tables
+                        finally:
+                            page.flush_cache()
+                            del page
                     
                     # Force garbage collection after each chunk
                     gc.collect()
@@ -263,8 +271,25 @@ class FedexBillProcessor(BaseProcessor):
             # Apply VAT and prepare data
             self._apply_vat()
 
-            # Create and process DataFrame
-            df = pd.DataFrame(self.data)
+            # Create DataFrame in chunks to minimize memory usage
+            chunk_size = 1000
+            dfs = []
+            data_length = len(self.data["Invoice"])
+            
+            for i in range(0, data_length, chunk_size):
+                chunk_data = {
+                    k: v[i:i + chunk_size] 
+                    for k, v in self.data.items()
+                }
+                df_chunk = pd.DataFrame(chunk_data)
+                dfs.append(df_chunk)
+                del chunk_data
+                gc.collect()
+
+            df = pd.concat(dfs, ignore_index=True)
+            del dfs
+            gc.collect()
+
             df = df.rename(columns={
                 "Invoice": "Invoice",
                 "Sutijuma nr un dimensijas": "Sutijuma Nr",
@@ -278,6 +303,9 @@ class FedexBillProcessor(BaseProcessor):
 
             # Save to Excel and prepare response
             relative_path = self._save_to_excel(df)
+            del df
+            gc.collect()
+            
             self.processed_files['analysis_file'] = relative_path
 
             return {
