@@ -87,7 +87,8 @@ class FedexBillProcessor(BaseProcessor):
         """
         try:
             self.validate_data()
-
+            
+            CHUNK_SIZE = 20  # Process 20 pages at a time
             data = {
                 "Invoice": [],
                 "Sutijuma nr un dimensijas": [],
@@ -108,63 +109,79 @@ class FedexBillProcessor(BaseProcessor):
                 if not invoice_number:
                     logging.warning("Could not find invoice number in the PDF")
                 
-                for page in pdf.pages:
-                    tables = page.extract_tables()
+                total_pages = len(pdf.pages)
+                for start_idx in range(0, total_pages, CHUNK_SIZE):
+                    end_idx = min(start_idx + CHUNK_SIZE, total_pages)
+                    logging.info(f"Processing pages {start_idx} to {end_idx} of {total_pages}")
+                    
+                    # Process chunk of pages
+                    for page_num in range(start_idx, end_idx):
+                        page = pdf.pages[page_num]
+                        tables = page.extract_tables()
+                        del page  # Explicitly delete page after processing
 
-                    for table in tables:
-                        if len(table) > 3 and len(table[0]) > 8:
-                            try:
-                                # Add invoice number to each row
-                                data["Invoice"].append(invoice_number or "Not found")
-                                
-                                sutijuma_nr_un_dimensijas_value = table[1][0]
-                                
-                                # Extract tracking number
-                                sutijuma_nr = ''.join(filter(str.isdigit, sutijuma_nr_un_dimensijas_value.split()[0]))
-                                data["Sutijuma nr un dimensijas"].append(sutijuma_nr)
-                                
-                                # Extract dimensions
-                                dimensijas_index = sutijuma_nr_un_dimensijas_value.find("Dimensijas")
-                                if dimensijas_index != -1:
-                                    dimensijas_value = sutijuma_nr_un_dimensijas_value[dimensijas_index + len("Dimensijas"):].strip()
-                                    data["Dimensijas"].append(dimensijas_value)
-                                else:
-                                    data["Dimensijas"].append("")
+                        for table in tables:
+                            if len(table) > 3 and len(table[0]) > 8:
+                                try:
+                                    # Add invoice number to each row
+                                    data["Invoice"].append(invoice_number or "Not found")
+                                    
+                                    sutijuma_nr_un_dimensijas_value = table[1][0]
+                                    
+                                    # Extract tracking number
+                                    sutijuma_nr = ''.join(filter(str.isdigit, sutijuma_nr_un_dimensijas_value.split()[0]))
+                                    data["Sutijuma nr un dimensijas"].append(sutijuma_nr)
+                                    
+                                    # Extract dimensions
+                                    dimensijas_index = sutijuma_nr_un_dimensijas_value.find("Dimensijas")
+                                    if dimensijas_index != -1:
+                                        dimensijas_value = sutijuma_nr_un_dimensijas_value[dimensijas_index + len("Dimensijas"):].strip()
+                                        data["Dimensijas"].append(dimensijas_value)
+                                    else:
+                                        data["Dimensijas"].append("")
 
-                                # Extract recipient data and country
-                                sanemejs_dati_value = table[2][3]
-                                sanemejs_dati_words = sanemejs_dati_value.split()
-                                
-                                valsts_value = sanemejs_dati_words[-1] if sanemejs_dati_words else ""
-                                data["Valsts"].append(valsts_value)
-                                
-                                if len(sanemejs_dati_words) > 3:
-                                    sanemejs_dati_value = ' '.join(sanemejs_dati_words[1:4])
-                                else:
-                                    sanemejs_dati_value = ' '.join(sanemejs_dati_words[1:])
-                                sanemejs_dati_value = ''.join(filter(lambda x: not x.isdigit(), sanemejs_dati_value)).strip()
-                                data["Sanemejs dati"].append(sanemejs_dati_value)
+                                    # Extract recipient data and country
+                                    sanemejs_dati_value = table[2][3]
+                                    sanemejs_dati_words = sanemejs_dati_value.split()
+                                    
+                                    valsts_value = sanemejs_dati_words[-1] if sanemejs_dati_words else ""
+                                    data["Valsts"].append(valsts_value)
+                                    
+                                    if len(sanemejs_dati_words) > 3:
+                                        sanemejs_dati_value = ' '.join(sanemejs_dati_words[1:4])
+                                    else:
+                                        sanemejs_dati_value = ' '.join(sanemejs_dati_words[1:])
+                                    sanemejs_dati_value = ''.join(filter(lambda x: not x.isdigit(), sanemejs_dati_value)).strip()
+                                    data["Sanemejs dati"].append(sanemejs_dati_value)
 
-                                # Extract service data
-                                servisa_dati_value = table[1][3].replace('Aprēķinātais svars', '').replace('kg', '').strip()
-                                servisa_dati_value = ''.join(filter(lambda x: not x.isdigit(), servisa_dati_value)).strip()
-                                servisa_dati_value = servisa_dati_value.replace(',', '')
-                                data["Servisa dati"].append(servisa_dati_value)
+                                    # Extract service data
+                                    servisa_dati_value = table[1][3].replace('Aprēķinātais svars', '').replace('kg', '').strip()
+                                    servisa_dati_value = ''.join(filter(lambda x: not x.isdigit(), servisa_dati_value)).strip()
+                                    servisa_dati_value = servisa_dati_value.replace(',', '')
+                                    data["Servisa dati"].append(servisa_dati_value)
 
-                                # Extract amount
-                                summa_value = table[3][8].replace('Kopā EUR', '').strip()
-                                data["Summa"].append(summa_value)
+                                    # Extract amount
+                                    summa_value = table[3][8].replace('Kopā EUR', '').strip()
+                                    data["Summa"].append(summa_value)
 
-                                # Extract delivery zone
-                                if "Attālinātā piegādes zona" in table[2][4]:
-                                    piegades_zona_value = table[2][4].split("Attālinātā piegādes zona", 1)[1].strip().split('\n')[0].strip()
-                                    data["Piegādes zona"].append(piegades_zona_value)
-                                else:
-                                    data["Piegādes zona"].append("")
+                                    # Extract delivery zone
+                                    if "Attālinātā piegādes zona" in table[2][4]:
+                                        piegades_zona_value = table[2][4].split("Attālinātā piegādes zona", 1)[1].strip().split('\n')[0].strip()
+                                        data["Piegādes zona"].append(piegades_zona_value)
+                                    else:
+                                        data["Piegādes zona"].append("")
 
-                            except Exception as e:
-                                logging.error(f"Error processing table row: {str(e)}")
-                                continue
+                                except Exception as e:
+                                    logging.error(f"Error processing table row: {str(e)}")
+                                    continue
+                            
+                            del table  # Explicitly delete table after processing
+                        
+                        del tables  # Explicitly delete tables after processing
+                    
+                    # Force garbage collection after each chunk
+                    import gc
+                    gc.collect()
 
             if not any(data.values()):
                 raise ValueError("No valid data found in PDF")
